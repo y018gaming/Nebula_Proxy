@@ -1,18 +1,15 @@
 {
   "name": "nebula-codespaces",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "A Codespaces-hosted browser-style workspace with a guarded page-fetch backend.",
+  "description": "Nebula remote Chromium browser for a private GitHub Codespace.",
   "type": "module",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
-  },
-  "engines": {
-    "node": ">=20"
-  },
+  "scripts": { "start": "node server.js", "dev": "node --watch server.js" },
+  "engines": { "node": ">=20" },
   "dependencies": {
     "express": "^5.1.0",
-    "helmet": "^8.1.0"
+    "helmet": "^8.1.0",
+    "http-proxy": "^1.18.1",
+    "puppeteer-core": "^24.10.2"
   }
 }

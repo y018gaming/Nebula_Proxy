@@ -1,152 +1,174 @@
-import express from "express";
-import helmet from "helmet";
-import dns from "node:dns/promises";
-import net from "node:net";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import express from 'express';
+import helmet from 'helmet';
+import http from 'node:http';
+import crypto from 'node:crypto';
+import { timingSafeEqual } from 'node:crypto';
+import httpProxy from 'http-proxy';
+import puppeteer from 'puppeteer-core';
+import { spawn } from 'node:child_process';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const HOST = process.env.HOST || "0.0.0.0";
-const MAX_HTML_BYTES = 1_500_000;
-const FETCH_TIMEOUT_MS = 12_000;
+const PASSWORD = process.env.NEBULA_PASSWORD;
+if (!PASSWORD || PASSWORD.length < 12) {
+  console.error('Set NEBULA_PASSWORD to a private password at least 12 characters long before starting Nebula.');
+  process.exit(1);
+}
 
-app.disable("x-powered-by");
+const app = express();
+const server = http.createServer(app);
+const proxy = httpProxy.createProxyServer({ target: 'http://127.0.0.1:6080', ws: true, changeOrigin: true });
+app.set('trust proxy', 1);
 app.use(helmet({
-  // The page viewer uses a sandboxed iframe for fetched content.
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", "data:", "https:"],
-      connectSrc: ["'self'"],
-      frameSrc: ["'self'", "blob:"],
+      imgSrc: ["'self'", 'data:'],
+      frameSrc: ["'self'"],
+      connectSrc: ["'self'", 'ws:', 'wss:'],
       objectSrc: ["'none'"],
-      upgradeInsecureRequests: null
+      baseUri: ["'self'"],
+      formAction: ["'self'"]
     }
   },
   crossOriginEmbedderPolicy: false
 }));
-app.use(express.json({ limit: "20kb" }));
-app.use(express.static(path.join(__dirname, "public"), { extensions: ["html"] }));
+app.use(express.urlencoded({ extended: false, limit: '10kb' }));
+app.use(express.json({ limit: '20kb' }));
 
-function isPrivateIPv4(ip) {
-  const p = ip.split(".").map(Number);
-  if (p.length !== 4 || p.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return true;
-  const [a, b] = p;
-  return a === 0 || a === 10 || a === 127 || a >= 224 ||
-    (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) ||
-    (a === 192 && b === 0) || (a === 198 && (b === 18 || b === 19));
+function safeEqual(a, b) {
+  const aa = Buffer.from(String(a)); const bb = Buffer.from(String(b));
+  return aa.length === bb.length && timingSafeEqual(aa, bb);
 }
-function isPrivateIPv6(ip) {
-  const s = ip.toLowerCase().split("%")[0];
-  return s === "::" || s === "::1" || s.startsWith("fc") || s.startsWith("fd") ||
-    /^fe[89ab]/.test(s) || s.startsWith("::ffff:127.") || s.startsWith("::ffff:10.") ||
-    s.startsWith("::ffff:192.168.") || s.startsWith("::ffff:169.254.");
+function signature(expiry) {
+  return crypto.createHmac('sha256', PASSWORD).update(String(expiry)).digest('hex');
 }
-async function validatePublicUrl(raw) {
-  let u;
-  try { u = new URL(raw); } catch { throw new Error("Enter a valid URL, such as https://example.com"); }
-  if (!["http:", "https:"].includes(u.protocol)) throw new Error("Only HTTP and HTTPS URLs are supported.");
-  if (u.username || u.password) throw new Error("URLs containing embedded credentials are not allowed.");
-  if (!u.hostname || u.hostname === "localhost" || u.hostname.endsWith(".localhost") || u.hostname.endsWith(".local")) {
-    throw new Error("Local and internal hostnames are blocked.");
+function validSession(req) {
+  const raw = req.headers.cookie || '';
+  const match = raw.match(/(?:^|;\s*)nebula_session=([^;]+)/);
+  if (!match) return false;
+  const [expiry, sig] = decodeURIComponent(match[1]).split('.');
+  if (!expiry || !sig || !/^\d+$/.test(expiry) || Number(expiry) < Date.now()) return false;
+  return safeEqual(sig, signature(expiry));
+}
+function setSession(res, req) {
+  const expiry = String(Date.now() + 8 * 60 * 60 * 1000);
+  const value = `${expiry}.${signature(expiry)}`;
+  res.cookie('nebula_session', value, {
+    httpOnly: true, sameSite: 'strict', secure: Boolean(req.secure), path: '/',
+    maxAge: 8 * 60 * 60 * 1000
+  });
+}
+const loginHtml = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Nebula sign in</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#08111f;color:#e8f2ff;font:16px system-ui}main{width:min(360px,calc(100% - 40px));padding:28px;border:1px solid #24364d;border-radius:18px;background:#101d30}h1{margin:0 0 8px}p{color:#9eb2ca}input,button{box-sizing:border-box;width:100%;padding:13px;border-radius:10px;margin-top:12px}input{background:#08111f;border:1px solid #30435d;color:white}button{border:0;background:#22c6b7;color:#05201f;font-weight:700;cursor:pointer}.error{color:#ff9d9d}</style><main><h1>✦ Nebula</h1><p>Sign in to your private remote browser.</p><form method="post" action="/login"><input type="password" name="password" placeholder="Nebula password" required autofocus><button type="submit">Sign in</button></form><p class="error" id="err"></p></main></html>`;
+app.get('/login', (req, res) => {
+  if (validSession(req)) return res.redirect('/');
+  res.status(200).type('html').send(loginHtml);
+});
+app.post('/login', (req, res) => {
+  if (!safeEqual(req.body.password || '', PASSWORD)) return res.status(401).type('html').send(loginHtml.replace('</main>', '<p class="error">Incorrect password. Try again.</p></main>'));
+  setSession(res, req);
+  res.redirect('/');
+});
+app.post('/logout', (req, res) => {
+  res.clearCookie('nebula_session', { path: '/', sameSite: 'strict', secure: Boolean(req.secure) });
+  res.redirect('/login');
+});
+app.use((req, res, next) => {
+  if (req.path === '/login') return next();
+  if (!validSession(req)) {
+    if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Sign in again to continue.' });
+    return res.redirect('/login');
   }
-  const ipType = net.isIP(u.hostname);
-  if (ipType === 4 && isPrivateIPv4(u.hostname)) throw new Error("Private or reserved IP addresses are blocked.");
-  if (ipType === 6 && isPrivateIPv6(u.hostname)) throw new Error("Private or reserved IP addresses are blocked.");
+  next();
+});
 
-  if (!ipType) {
-    let records;
-    try { records = await dns.lookup(u.hostname, { all: true, verbatim: true }); }
-    catch { throw new Error("The hostname could not be resolved."); }
-    if (!records.length || records.some(r => r.family === 4 ? isPrivateIPv4(r.address) : isPrivateIPv6(r.address))) {
-      throw new Error("This hostname resolves to a private or reserved address and is blocked.");
-    }
-  }
-  return u;
+let browser;
+let activePage;
+async function getBrowser() {
+  if (browser && browser.connected) return browser;
+  browser = await puppeteer.connect({ browserURL: 'http://127.0.0.1:9222', defaultViewport: null });
+  browser.on('disconnected', () => { browser = undefined; activePage = undefined; });
+  const pages = await browser.pages();
+  activePage = pages.find(p => p.url() !== 'chrome://newtab/') || pages[0];
+  return browser;
 }
-
-app.get("/api/health", (_req, res) => res.json({ ok: true, name: "Nebula", version: "1.0.0" }));
-
-app.post("/api/fetch", async (req, res) => {
-  const raw = typeof req.body?.url === "string" ? req.body.url.trim() : "";
-  if (!raw || raw.length > 2048) return res.status(400).json({ error: "A URL is required (maximum 2048 characters)." });
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+function normalizeAddress(input) {
+  const value = String(input || '').trim();
+  if (!value) throw new Error('Enter a website or search phrase.');
+  if (/^(javascript|file|data|chrome|devtools):/i.test(value)) throw new Error('That URL scheme is not allowed from the Nebula address bar.');
+  if (/^https?:\/\//i.test(value)) return value;
+  if (/^[\w.-]+\.[a-z]{2,}(?:[/:?#]|$)/i.test(value) && !/\s/.test(value)) return `https://${value}`;
+  return `https://www.google.com/search?q=${encodeURIComponent(value)}`;
+}
+app.get('/api/status', async (req, res) => {
+  try { await getBrowser(); res.json({ ok: true, browser: 'connected' }); }
+  catch { res.status(503).json({ ok: false, browser: 'starting', message: 'Chromium is still starting. Wait a few seconds and retry.' }); }
+});
+app.post('/api/navigate', async (req, res) => {
   try {
-    const url = await validatePublicUrl(raw);
-    // Redirects are disabled so an allowed public host cannot redirect to an internal target.
-    const response = await fetch(url, {
-      method: "GET",
-      redirect: "manual",
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "NebulaDemo/1.0 (+Codespaces page viewer)",
-        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8"
-      }
-    });
-    if ([301, 302, 303, 307, 308].includes(response.status)) {
-      return res.status(400).json({ error: "This destination redirects. Open the final public URL directly in the address bar." });
-    }
-    const type = response.headers.get("content-type") || "";
-    if (!(type.includes("text/html") || type.includes("application/xhtml+xml") || type.startsWith("text/plain"))) {
-      return res.status(415).json({ error: `Unsupported content type: ${type || "unknown"}. Nebula's demo viewer supports HTML and plain text only.` });
-    }
-    const declaredLength = Number(response.headers.get("content-length") || 0);
-    if (declaredLength > MAX_HTML_BYTES) return res.status(413).json({ error: "Page is too large for the demo viewer." });
-    const reader = response.body?.getReader();
-    if (!reader) return res.status(502).json({ error: "The destination returned an empty response." });
-    const chunks = [];
-    let size = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > MAX_HTML_BYTES) {
-        await reader.cancel();
-        return res.status(413).json({ error: "Page is too large for the demo viewer." });
-      }
-      chunks.push(value);
-    }
-    const body = Buffer.concat(chunks).toString("utf8");
-    // Return remote content as data, never as same-origin HTML. The client displays it in a sandboxed iframe.
-    res.json({
-      ok: response.ok,
-      status: response.status,
-      contentType: type,
-      finalUrl: url.href,
-      html: type.startsWith("text/plain")
-        ? `<pre>${escapeHtml(body)}</pre>`
-        : body
-    });
-  } catch (err) {
-    const message = err.name === "AbortError" ? "The request timed out." : (err.message || "Could not fetch that page.");
-    res.status(400).json({ error: message });
-  } finally {
-    clearTimeout(timer);
+    const url = normalizeAddress(req.body.address);
+    const b = await getBrowser();
+    if (!activePage || activePage.isClosed()) activePage = (await b.pages())[0] || await b.newPage();
+    await activePage.bringToFront();
+    await activePage.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    res.json({ ok: true, url: activePage.url(), title: await activePage.title().catch(() => '') });
+  } catch (error) {
+    res.status(400).json({ error: error.message || 'Navigation failed.' });
   }
 });
-
-function escapeHtml(s) {
-  return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
-}
-
-app.get("/{*path}", (req, res, next) => {
-  if (req.path.startsWith("/api/")) return next();
-  res.sendFile(path.join(__dirname, "public", "index.html"));
+app.post('/api/action/:action', async (req, res) => {
+  try {
+    const b = await getBrowser();
+    if (!activePage || activePage.isClosed()) activePage = (await b.pages())[0] || await b.newPage();
+    if (req.params.action === 'back') await activePage.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    else if (req.params.action === 'forward') await activePage.goForward({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    else if (req.params.action === 'reload') await activePage.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+    else if (req.params.action === 'new') { activePage = await b.newPage(); await activePage.goto('about:blank'); }
+    else return res.status(404).json({ error: 'Unknown browser action.' });
+    res.json({ ok: true, url: activePage.url(), title: await activePage.title().catch(() => '') });
+  } catch (error) { res.status(500).json({ error: error.message || 'Browser action failed.' }); }
+});
+app.get('/api/tabs', async (req, res) => {
+  try {
+    const b = await getBrowser();
+    const pages = (await b.pages()).filter(p => !p.isClosed() && !p.url().startsWith('devtools://'));
+    res.json({ tabs: await Promise.all(pages.map(async (p, index) => ({ index, url: p.url(), title: await p.title().catch(() => 'New tab'), active: p === activePage }))) });
+  } catch { res.status(503).json({ error: 'Browser is starting.' }); }
+});
+app.post('/api/tabs/:index/activate', async (req, res) => {
+  try {
+    const b = await getBrowser(); const pages = (await b.pages()).filter(p => !p.isClosed() && !p.url().startsWith('devtools://'));
+    const page = pages[Number(req.params.index)]; if (!page) return res.status(404).json({ error: 'Tab not found.' });
+    activePage = page; await page.bringToFront(); res.json({ ok: true, url: page.url(), title: await page.title().catch(() => '') });
+  } catch { res.status(500).json({ error: 'Could not activate tab.' }); }
+});
+app.post('/api/tabs/:index/close', async (req, res) => {
+  try {
+    const b = await getBrowser(); const pages = (await b.pages()).filter(p => !p.isClosed() && !p.url().startsWith('devtools://'));
+    const page = pages[Number(req.params.index)]; if (!page) return res.status(404).json({ error: 'Tab not found.' });
+    await page.close(); const left = (await b.pages()).filter(p => !p.isClosed()); activePage = left[0] || await b.newPage(); await activePage.bringToFront(); res.json({ ok: true });
+  } catch { res.status(500).json({ error: 'Could not close tab.' }); }
 });
 
-app.use((err, _req, res, _next) => {
-  console.error(err);
-  res.status(500).json({ error: "Unexpected server error." });
+// Reverse-proxy noVNC through the authenticated app origin. The VNC/WebSocket
+// listeners remain on loopback and are not exposed as separate forwarded ports.
+app.use('/desktop', (req, res) => {
+  req.url = req.url.replace(/^\/desktop/, '') || '/';
+  proxy.web(req, res, error => { if (!res.headersSent) res.status(502).send('Remote desktop is starting. Refresh in a few seconds.'); });
 });
+app.use(express.static('public', { index: 'index.html', dotfiles: 'deny', maxAge: '1h' }));
+app.get('/{*path}', (req, res) => res.sendFile(new URL('./public/index.html', import.meta.url).pathname));
 
-app.listen(PORT, HOST, () => {
-  console.log(`Nebula listening on http://${HOST}:${PORT}`);
+server.on('upgrade', (req, socket, head) => {
+  if (!req.url?.startsWith('/desktop/')) return socket.destroy();
+  if (!validSession(req)) { socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); return socket.destroy(); }
+  req.url = req.url.replace(/^\/desktop/, '') || '/';
+  proxy.ws(req, socket, head, error => { if (error) socket.destroy(); });
 });
+proxy.on('error', () => {});
+server.listen(PORT, '0.0.0.0', () => console.log(`Nebula listening on port ${PORT}. Keep this Codespaces port private.`));
+
+// Start the local browser/desktop stack. These processes are private to the container.
+const starter = spawn('/usr/local/bin/start-nebula-browser', [], { stdio: 'ignore', detached: true });
+starter.unref();
