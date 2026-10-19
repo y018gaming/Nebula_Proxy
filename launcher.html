@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nebula Launcher</title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#080f1d;color:#e7eefb;font:15px/1.5 system-ui,sans-serif;padding:24px}.card{width:min(560px,100%);padding:32px;border:1px solid #263c58;border-radius:22px;background:linear-gradient(145deg,#12233a,#0c1728);box-shadow:0 24px 80px #0005}.logo{display:flex;gap:12px;align-items:center;font-weight:800;font-size:22px}.mark{display:grid;place-items:center;width:42px;height:42px;border-radius:14px;background:linear-gradient(135deg,#53e0ce,#6f9cff);color:#071624;font-size:25px}h1{font-size:30px;letter-spacing:-1px;margin:25px 0 8px}p{color:#9aacc6}.field{display:flex;gap:8px;margin-top:24px}.field input{min-width:0;flex:1;background:#0a1423;border:1px solid #304662;border-radius:10px;padding:13px;color:white;outline:none}.field button{border:0;border-radius:10px;padding:0 16px;background:linear-gradient(135deg,#53e0ce,#6f9cff);color:#071624;font-weight:800;cursor:pointer}.note{font-size:12px;color:#778ca9;margin-top:18px}.status{font-size:13px;color:#75ded3;margin-top:12px;min-height:20px}
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="logo"><span class="mark">✦</span> Nebula <span style="font-size:10px;color:#75ded3;letter-spacing:2px">LAUNCHER</span></div>
+  <h1>Open your workspace.</h1>
+  <p>Paste the forwarded URL for your running Nebula Codespace, then open it in a new blank tab.</p>
+  <form id="launchForm" class="field">
+    <input id="appUrl" type="url" placeholder="https://your-codespace-3000.app.github.dev" required>
+    <button type="submit">Launch ↗</button>
+  </form>
+  <div class="status" id="status" aria-live="polite"></div>
+  <p class="note">This launcher opens your Nebula app in a new tab. Browser policies, pop-up blockers, and the target site's framing rules may affect the result. It does not itself proxy websites.</p>
+</main>
+<script>
+document.getElementById("launchForm").addEventListener("submit", function(event) {
+  event.preventDefault();
+  const field = document.getElementById("appUrl");
+  let url;
+  try { url = new URL(field.value.trim()); } catch {
+    document.getElementById("status").textContent = "Enter a valid URL.";
+    return;
+  }
+  if (!["http:", "https:"].includes(url.protocol)) {
+    document.getElementById("status").textContent = "Only HTTP or HTTPS URLs are supported.";
+    return;
+  }
+  const blank = window.open("about:blank", "_blank");
+  if (!blank) {
+    document.getElementById("status").textContent = "Pop-up blocked. Allow pop-ups for this page and try again.";
+    return;
+  }
+  blank.document.title = "Nebula";
+  blank.document.body.style.cssText = "margin:0;background:#080f1d;color:#e7eefb;font:14px system-ui,sans-serif";
+  const frame = blank.document.createElement("iframe");
+  frame.src = url.href;
+  frame.title = "Nebula workspace";
+  frame.style.cssText = "position:fixed;inset:0;width:100%;height:100%;border:0;background:#080f1d";
+  blank.document.body.appendChild(frame);
+  document.getElementById("status").textContent = "Opened Nebula in a new blank tab.";
+});
+</script>
+</body>
+</html>
