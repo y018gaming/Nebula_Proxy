@@ -1,10 +1,19 @@
+
 {
   "name": "Nebula Remote Browser",
-  "build": { "dockerfile": "Dockerfile" },
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
   "forwardPorts": [3000],
   "portsAttributes": {
-    "3000": { "label": "Nebula", "onAutoForward": "openBrowser", "visibility": "private" }
+    "3000": {
+      "label": "Nebula",
+      "onAutoForward": "openBrowser",
+      "visibility": "private"
+    }
   },
   "postCreateCommand": "npm install",
   "remoteUser": "node"
 }
+   
