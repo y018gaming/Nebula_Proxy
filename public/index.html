@@ -1,21 +1,86 @@
+
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#08111f">
-  <title>Nebula — Remote Browser</title><link rel="stylesheet" href="/styles.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#08111f">
+  <title>Nebula — Remote Browser</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
 </head>
 <body>
-<div class="app-shell">
-  <header class="topbar"><div class="brand"><span class="brand-mark">✦</span><span>Nebula</span><span class="version">REMOTE BETA</span></div><div class="top-actions"><span class="status-label"><i class="status-dot"></i><span id="connectionStatus">Connecting to Chromium…</span></span><form method="post" action="/logout"><button class="quiet-button" type="submit">Sign out</button></form></div></header>
-  <nav class="tabs" id="tabs" aria-label="Remote browser tabs"><span class="tab active">✦ <span>Remote browser</span></span><button id="newTabBtn" class="new-tab" title="New tab">＋</button></nav>
-  <main class="browser">
-    <div class="toolbar">
-      <button class="icon-button" data-action="back" title="Back" aria-label="Back">←</button><button class="icon-button" data-action="forward" title="Forward" aria-label="Forward">→</button><button class="icon-button" data-action="reload" title="Reload" aria-label="Reload">↻</button>
-      <form id="addressForm" class="address-form"><span class="secure-icon">◎</span><input id="address" autocomplete="url" spellcheck="false" placeholder="Search or enter a URL" aria-label="Search or enter a URL"><button class="go-button" type="submit">Go ↗</button></form>
-    </div>
-    <div class="notice"><span>ⓘ</span><span>Websites run in remote Chromium. Click inside the desktop below to interact. Use the address bar above or the browser's own address bar.</span></div>
-    <section class="viewer-wrap"><iframe id="desktopFrame" title="Nebula remote Chromium desktop" src="/desktop/vnc.html?autoconnect=true&resize=remote&path=desktop/websockify&reconnect=true&show_dot=true"></iframe></section>
-    <footer class="footer"><span><i class="status-dot"></i> Private remote session</span><span>Don't make this port public or share your password.</span></footer>
-  </main>
-</div><script src="/app.js" defer></script>
-</body></html>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Nebula home">
+        <span class="brand-mark">✦</span>
+        <span>Nebula</span>
+        <span class="version">REMOTE BROWSER</span>
+      </a>
+
+      <div class="top-actions">
+        <span class="status-label">
+          <i class="status-dot" id="statusDot"></i>
+          <span id="connectionStatus">Connecting…</span>
+        </span>
+      </div>
+    </header>
+
+    <main class="browser">
+      <nav class="tabs" id="tabs" aria-label="Browser tabs">
+        <div class="tab-placeholder">Loading tabs…</div>
+        <button id="newTabBtn" class="new-tab"
+          type="button" title="New tab" aria-label="New tab">＋</button>
+      </nav>
+
+      <div class="toolbar">
+        <button class="icon-button" data-action="back"
+          type="button" title="Back" aria-label="Back">←</button>
+        <button class="icon-button" data-action="forward"
+          type="button" title="Forward" aria-label="Forward">→</button>
+        <button class="icon-button" data-action="reload"
+          type="button" title="Reload" aria-label="Reload">↻</button>
+
+        <form id="addressForm" class="address-form">
+          <span class="secure-icon" aria-hidden="true">◎</span>
+          <input
+            id="address"
+            type="text"
+            autocomplete="url"
+            spellcheck="false"
+            placeholder="Search or enter a URL"
+            aria-label="Search or enter a URL"
+            required
+          >
+          <button class="go-button" type="submit">Go ↗</button>
+        </form>
+      </div>
+
+      <section class="viewer-wrap" aria-label="Remote browser view">
+        <iframe
+          id="desktopFrame"
+          title="Nebula remote browser"
+          src="/desktop/vnc.html?autoconnect=true&amp;resize=remote&amp;quality=6&amp;compression=2&amp;path=desktop/websockify&amp;reconnect=true&amp;show_dot=true"
+          allow="clipboard-read; clipboard-write"
+        ></iframe>
+
+        <div id="reconnectPanel" class="reconnect-panel" hidden>
+          <div class="reconnect-card">
+            <div class="reconnect-icon">✦</div>
+            <h2>Reconnecting to your browser</h2>
+            <p>The Nebula interface is still running. The remote desktop may take a moment to return.</p>
+            <button id="reconnectBtn" class="go-button" type="button">
+              Reconnect
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <span><i class="status-dot"></i> Remote session</span>
+        <span>Keep the Codespaces port private.</span>
+      </footer>
+    </main>
+  </div>
+</body>
+</html>
