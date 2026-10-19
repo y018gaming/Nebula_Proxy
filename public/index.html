@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1220">
+  <title>Nebula</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">✦</span><span>Nebula</span><span class="version">BETA</span></div>
+      <div class="window-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+    </header>
+    <nav class="tabs" id="tabs" aria-label="Browser tabs"></nav>
+    <main class="browser">
+      <div class="toolbar">
+        <button class="icon-button" id="backBtn" title="Back" aria-label="Back">←</button>
+        <button class="icon-button" id="forwardBtn" title="Forward" aria-label="Forward">→</button>
+        <button class="icon-button" id="reloadBtn" title="Reload" aria-label="Reload">↻</button>
+        <form id="addressForm" class="address-form">
+          <span class="secure-icon">◎</span>
+          <input id="address" autocomplete="url" spellcheck="false" placeholder="Search or enter a URL" aria-label="Search or enter a URL">
+          <button class="go-button" type="submit">Go ↗</button>
+        </form>
+        <button class="icon-button" id="newTabBtn" title="New tab" aria-label="New tab">＋</button>
+      </div>
+      <section id="home" class="home">
+        <div class="orb orb-one"></div><div class="orb orb-two"></div>
+        <div class="hero">
+          <div class="hero-icon">✦</div>
+          <p class="eyebrow">YOUR SPACE ON THE WEB</p>
+          <h1>Explore the <span>unknown.</span></h1>
+          <p class="subtitle">A lightweight browser workspace, hosted by your Codespace.</p>
+          <form id="homeForm" class="home-search">
+            <span>⌕</span><input id="homeAddress" placeholder="Enter a website or search the web" aria-label="Website or search">
+            <button type="submit">Explore</button>
+          </form>
+          <div class="quick-links">
+            <button data-url="https://example.com"><b>Ex</b><span>Example</span></button>
+            <button data-url="https://developer.mozilla.org"><b>MDN</b><span>Web docs</span></button>
+            <button data-url="https://www.wikipedia.org"><b>W</b><span>Wikipedia</span></button>
+          </div>
+          <p class="hint">Tip: enter a full URL, or type a search phrase.</p>
+        </div>
+      </section>
+      <section id="viewerWrap" class="viewer-wrap hidden">
+        <div id="status" class="status"><span class="spinner"></span> Preparing page…</div>
+        <iframe id="viewer" title="Fetched page viewer" sandbox="allow-forms allow-scripts allow-popups" referrerpolicy="no-referrer"></iframe>
+      </section>
+      <section id="error" class="error hidden" role="alert"></section>
+      <footer class="footer"><span><i class="status-dot"></i> Nebula is running</span><span>Demo page viewer · Some sites may not be compatible</span></footer>
+    </main>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
