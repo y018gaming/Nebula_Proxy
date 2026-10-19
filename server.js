@@ -1,30 +1,35 @@
+
 import express from 'express';
 import helmet from 'helmet';
 import http from 'node:http';
-import crypto from 'node:crypto';
-import { timingSafeEqual } from 'node:crypto';
 import httpProxy from 'http-proxy';
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
 const PORT = Number(process.env.PORT || 3000);
-const PASSWORD = process.env.NEBULA_PASSWORD;
-if (!PASSWORD || PASSWORD.length < 12) {
-  console.error('Set NEBULA_PASSWORD to a private password at least 12 characters long before starting Nebula.');
-  process.exit(1);
-}
+const PUBLIC_DIR = fileURLToPath(new URL('./public/', import.meta.url));
 
 const app = express();
 const server = http.createServer(app);
-const proxy = httpProxy.createProxyServer({ target: 'http://127.0.0.1:6080', ws: true, changeOrigin: true });
-app.set('trust proxy', 1);
+const proxy = httpProxy.createProxyServer({
+  target: 'http://127.0.0.1:6080',
+  ws: true,
+  changeOrigin: true,
+  proxyTimeout: 30000,
+  timeout: 30000
+});
+
+app.disable('x-powered-by');
+
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", 'data:'],
+      imgSrc: ["'self'", 'data:', 'blob:'],
       frameSrc: ["'self'"],
       connectSrc: ["'self'", 'ws:', 'wss:'],
       objectSrc: ["'none'"],
@@ -34,141 +39,346 @@ app.use(helmet({
   },
   crossOriginEmbedderPolicy: false
 }));
-app.use(express.urlencoded({ extended: false, limit: '10kb' }));
-app.use(express.json({ limit: '20kb' }));
 
-function safeEqual(a, b) {
-  const aa = Buffer.from(String(a)); const bb = Buffer.from(String(b));
-  return aa.length === bb.length && timingSafeEqual(aa, bb);
-}
-function signature(expiry) {
-  return crypto.createHmac('sha256', PASSWORD).update(String(expiry)).digest('hex');
-}
-function validSession(req) {
-  const raw = req.headers.cookie || '';
-  const match = raw.match(/(?:^|;\s*)nebula_session=([^;]+)/);
-  if (!match) return false;
-  const [expiry, sig] = decodeURIComponent(match[1]).split('.');
-  if (!expiry || !sig || !/^\d+$/.test(expiry) || Number(expiry) < Date.now()) return false;
-  return safeEqual(sig, signature(expiry));
-}
-function setSession(res, req) {
-  const expiry = String(Date.now() + 8 * 60 * 60 * 1000);
-  const value = `${expiry}.${signature(expiry)}`;
-  res.cookie('nebula_session', value, {
-    httpOnly: true, sameSite: 'strict', secure: Boolean(req.secure), path: '/',
-    maxAge: 8 * 60 * 60 * 1000
-  });
-}
-const loginHtml = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Nebula sign in</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#08111f;color:#e8f2ff;font:16px system-ui}main{width:min(360px,calc(100% - 40px));padding:28px;border:1px solid #24364d;border-radius:18px;background:#101d30}h1{margin:0 0 8px}p{color:#9eb2ca}input,button{box-sizing:border-box;width:100%;padding:13px;border-radius:10px;margin-top:12px}input{background:#08111f;border:1px solid #30435d;color:white}button{border:0;background:#22c6b7;color:#05201f;font-weight:700;cursor:pointer}.error{color:#ff9d9d}</style><main><h1>✦ Nebula</h1><p>Sign in to your private remote browser.</p><form method="post" action="/login"><input type="password" name="password" placeholder="Nebula password" required autofocus><button type="submit">Sign in</button></form><p class="error" id="err"></p></main></html>`;
-app.get('/login', (req, res) => {
-  if (validSession(req)) return res.redirect('/');
-  res.status(200).type('html').send(loginHtml);
-});
-app.post('/login', (req, res) => {
-  if (!safeEqual(req.body.password || '', PASSWORD)) return res.status(401).type('html').send(loginHtml.replace('</main>', '<p class="error">Incorrect password. Try again.</p></main>'));
-  setSession(res, req);
-  res.redirect('/');
-});
-app.post('/logout', (req, res) => {
-  res.clearCookie('nebula_session', { path: '/', sameSite: 'strict', secure: Boolean(req.secure) });
-  res.redirect('/login');
-});
-app.use((req, res, next) => {
-  if (req.path === '/login') return next();
-  if (!validSession(req)) {
-    if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Sign in again to continue.' });
-    return res.redirect('/login');
-  }
-  next();
-});
+app.use(express.json({ limit: '20kb' }));
 
 let browser;
 let activePage;
-async function getBrowser() {
-  if (browser && browser.connected) return browser;
-  browser = await puppeteer.connect({ browserURL: 'http://127.0.0.1:9222', defaultViewport: null });
-  browser.on('disconnected', () => { browser = undefined; activePage = undefined; });
-  const pages = await browser.pages();
-  activePage = pages.find(p => p.url() !== 'chrome://newtab/') || pages[0];
-  return browser;
-}
+let connectingBrowser;
+let lastBrowserError = '';
+let navigationInProgress = false;
+
 function normalizeAddress(input) {
   const value = String(input || '').trim();
-  if (!value) throw new Error('Enter a website or search phrase.');
-  if (/^(javascript|file|data|chrome|devtools):/i.test(value)) throw new Error('That URL scheme is not allowed from the Nebula address bar.');
-  if (/^https?:\/\//i.test(value)) return value;
-  if (/^[\w.-]+\.[a-z]{2,}(?:[/:?#]|$)/i.test(value) && !/\s/.test(value)) return `https://${value}`;
+
+  if (!value) {
+    throw new Error('Enter a website or search phrase.');
+  }
+
+  if (/^(javascript|file|data|chrome|devtools):/i.test(value)) {
+    throw new Error('That address type is not supported.');
+  }
+
+  if (/^https?:\/\//i.test(value)) {
+    const parsed = new URL(value);
+
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      throw new Error('Only HTTP and HTTPS addresses are supported.');
+    }
+
+    return parsed.href;
+  }
+
+  if (
+    /^[\w.-]+\.[a-z]{2,}(?:[/:?#]|$)/i.test(value) &&
+    !/\s/.test(value)
+  ) {
+    return `https://${value}`;
+  }
+
   return `https://www.google.com/search?q=${encodeURIComponent(value)}`;
 }
-app.get('/api/status', async (req, res) => {
-  try { await getBrowser(); res.json({ ok: true, browser: 'connected' }); }
-  catch { res.status(503).json({ ok: false, browser: 'starting', message: 'Chromium is still starting. Wait a few seconds and retry.' }); }
-});
-app.post('/api/navigate', async (req, res) => {
+
+async function getBrowser() {
+  if (browser?.connected) {
+    return browser;
+  }
+
+  if (connectingBrowser) {
+    return connectingBrowser;
+  }
+
+  connectingBrowser = (async () => {
+    const connected = await puppeteer.connect({
+      browserURL: 'http://127.0.0.1:9222',
+      defaultViewport: null
+    });
+
+    connected.on('disconnected', () => {
+      if (browser === connected) {
+        browser = undefined;
+        activePage = undefined;
+        lastBrowserError = 'Chromium disconnected. Reconnecting…';
+      }
+    });
+
+    browser = connected;
+    lastBrowserError = '';
+
+    const pages = await connected.pages();
+
+    activePage =
+      pages.find(page => !page.isClosed() && page.url() !== 'chrome://newtab/') ||
+      pages.find(page => !page.isClosed()) ||
+      await connected.newPage();
+
+    return connected;
+  })();
+
   try {
-    const url = normalizeAddress(req.body.address);
-    const b = await getBrowser();
-    if (!activePage || activePage.isClosed()) activePage = (await b.pages())[0] || await b.newPage();
-    await activePage.bringToFront();
-    await activePage.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    res.json({ ok: true, url: activePage.url(), title: await activePage.title().catch(() => '') });
+    return await connectingBrowser;
   } catch (error) {
-    res.status(400).json({ error: error.message || 'Navigation failed.' });
+    lastBrowserError = error.message || 'Chromium is not ready.';
+    browser = undefined;
+    activePage = undefined;
+    throw error;
+  } finally {
+    connectingBrowser = undefined;
+  }
+}
+
+async function getActivePage() {
+  const connected = await getBrowser();
+
+  if (!activePage || activePage.isClosed()) {
+    const pages = await connected.pages();
+    activePage = pages.find(page => !page.isClosed()) ||
+      await connected.newPage();
+  }
+
+  return activePage;
+}
+
+async function navigateTo(address) {
+  if (navigationInProgress) {
+    throw new Error('A navigation is already in progress. Try again shortly.');
+  }
+
+  navigationInProgress = true;
+
+  try {
+    const url = normalizeAddress(address);
+    const page = await getActivePage();
+
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000
+    });
+
+    return {
+      ok: true,
+      url: page.url(),
+      title: await page.title().catch(() => '')
+    };
+  } finally {
+    navigationInProgress = false;
+  }
+}
+
+app.get('/api/status', async (_req, res) => {
+  try {
+    const page = await getActivePage();
+
+    res.json({
+      ok: true,
+      browser: 'connected',
+      url: page.url(),
+      title: await page.title().catch(() => '')
+    });
+  } catch {
+    res.status(503).json({
+      ok: false,
+      browser: 'starting',
+      message: lastBrowserError || 'Chromium is starting. Try again shortly.'
+    });
   }
 });
+
+app.post('/api/navigate', async (req, res) => {
+  try {
+    res.json(await navigateTo(req.body?.address));
+  } catch (error) {
+    const unavailable = !browser?.connected;
+
+    res.status(unavailable ? 503 : 400).json({
+      error: error.message || 'Navigation failed.',
+      retryable: unavailable
+    });
+  }
+});
+
 app.post('/api/action/:action', async (req, res) => {
   try {
-    const b = await getBrowser();
-    if (!activePage || activePage.isClosed()) activePage = (await b.pages())[0] || await b.newPage();
-    if (req.params.action === 'back') await activePage.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-    else if (req.params.action === 'forward') await activePage.goForward({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-    else if (req.params.action === 'reload') await activePage.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
-    else if (req.params.action === 'new') { activePage = await b.newPage(); await activePage.goto('about:blank'); }
-    else return res.status(404).json({ error: 'Unknown browser action.' });
-    res.json({ ok: true, url: activePage.url(), title: await activePage.title().catch(() => '') });
-  } catch (error) { res.status(500).json({ error: error.message || 'Browser action failed.' }); }
+    const page = await getActivePage();
+
+    switch (req.params.action) {
+      case 'back':
+        await page.goBack({
+          waitUntil: 'domcontentloaded',
+          timeout: 15000
+        }).catch(() => {});
+        break;
+
+      case 'forward':
+        await page.goForward({
+          waitUntil: 'domcontentloaded',
+          timeout: 15000
+        }).catch(() => {});
+        break;
+
+      case 'reload':
+        await page.reload({
+          waitUntil: 'domcontentloaded',
+          timeout: 20000
+        }).catch(() => {});
+        break;
+
+      case 'new': {
+        const connected = await getBrowser();
+        activePage = await connected.newPage();
+        await activePage.goto('about:blank');
+        break;
+      }
+
+      default:
+        return res.status(404).json({
+          error: 'Unknown browser action.'
+        });
+    }
+
+    res.json({
+      ok: true,
+      url: activePage.url(),
+      title: await activePage.title().catch(() => '')
+    });
+  } catch (error) {
+    res.status(503).json({
+      error: error.message || 'Browser action failed.',
+      retryable: true
+    });
+  }
 });
-app.get('/api/tabs', async (req, res) => {
+
+app.get('/api/tabs', async (_req, res) => {
   try {
-    const b = await getBrowser();
-    const pages = (await b.pages()).filter(p => !p.isClosed() && !p.url().startsWith('devtools://'));
-    res.json({ tabs: await Promise.all(pages.map(async (p, index) => ({ index, url: p.url(), title: await p.title().catch(() => 'New tab'), active: p === activePage }))) });
-  } catch { res.status(503).json({ error: 'Browser is starting.' }); }
+    const connected = await getBrowser();
+    const pages = (await connected.pages()).filter(
+      page => !page.isClosed() && !page.url().startsWith('devtools://')
+    );
+
+    res.json({
+      tabs: await Promise.all(pages.map(async (page, index) => ({
+        index,
+        url: page.url(),
+        title: await page.title().catch(() => 'New tab'),
+        active: page === activePage
+      })))
+    });
+  } catch {
+    res.status(503).json({
+      error: 'Chromium is starting.',
+      tabs: []
+    });
+  }
 });
+
 app.post('/api/tabs/:index/activate', async (req, res) => {
   try {
-    const b = await getBrowser(); const pages = (await b.pages()).filter(p => !p.isClosed() && !p.url().startsWith('devtools://'));
-    const page = pages[Number(req.params.index)]; if (!page) return res.status(404).json({ error: 'Tab not found.' });
-    activePage = page; await page.bringToFront(); res.json({ ok: true, url: page.url(), title: await page.title().catch(() => '') });
-  } catch { res.status(500).json({ error: 'Could not activate tab.' }); }
+    const connected = await getBrowser();
+    const pages = (await connected.pages()).filter(
+      page => !page.isClosed() && !page.url().startsWith('devtools://')
+    );
+
+    const index = Number(req.params.index);
+    const page = Number.isInteger(index) ? pages[index] : undefined;
+
+    if (!page) {
+      return res.status(404).json({ error: 'Tab not found.' });
+    }
+
+    activePage = page;
+    await page.bringToFront();
+
+    res.json({
+      ok: true,
+      url: page.url(),
+      title: await page.title().catch(() => '')
+    });
+  } catch {
+    res.status(503).json({ error: 'Chromium is starting.' });
+  }
 });
+
 app.post('/api/tabs/:index/close', async (req, res) => {
   try {
-    const b = await getBrowser(); const pages = (await b.pages()).filter(p => !p.isClosed() && !p.url().startsWith('devtools://'));
-    const page = pages[Number(req.params.index)]; if (!page) return res.status(404).json({ error: 'Tab not found.' });
-    await page.close(); const left = (await b.pages()).filter(p => !p.isClosed()); activePage = left[0] || await b.newPage(); await activePage.bringToFront(); res.json({ ok: true });
-  } catch { res.status(500).json({ error: 'Could not close tab.' }); }
+    const connected = await getBrowser();
+    const pages = (await connected.pages()).filter(
+      page => !page.isClosed() && !page.url().startsWith('devtools://')
+    );
+
+    const index = Number(req.params.index);
+    const page = Number.isInteger(index) ? pages[index] : undefined;
+
+    if (!page) {
+      return res.status(404).json({ error: 'Tab not found.' });
+    }
+
+    await page.close();
+
+    const remaining = (await connected.pages()).filter(
+      item => !item.isClosed()
+    );
+
+    activePage = remaining[0] || await connected.newPage();
+
+    res.json({
+      ok: true,
+      url: activePage.url(),
+      title: await activePage.title().catch(() => '')
+    });
+  } catch {
+    res.status(503).json({ error: 'Could not close tab.' });
+  }
 });
 
-// Reverse-proxy noVNC through the authenticated app origin. The VNC/WebSocket
-// listeners remain on loopback and are not exposed as separate forwarded ports.
+// Keep the remote desktop behind the same app origin.
 app.use('/desktop', (req, res) => {
   req.url = req.url.replace(/^\/desktop/, '') || '/';
-  proxy.web(req, res, error => { if (!res.headersSent) res.status(502).send('Remote desktop is starting. Refresh in a few seconds.'); });
+
+  proxy.web(req, res, error => {
+    if (!res.headersSent) {
+      res.status(502).send(
+        'Remote desktop is starting. Wait a moment and refresh.'
+      );
+    }
+  });
 });
-app.use(express.static('public', { index: 'index.html', dotfiles: 'deny', maxAge: '1h' }));
-app.get('/{*path}', (req, res) => res.sendFile(new URL('./public/index.html', import.meta.url).pathname));
+
+app.use(express.static(PUBLIC_DIR, {
+  index: 'index.html',
+  dotfiles: 'deny',
+  maxAge: '1h'
+}));
+
+app.get('/{*path}', (_req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+});
 
 server.on('upgrade', (req, socket, head) => {
-  if (!req.url?.startsWith('/desktop/')) return socket.destroy();
-  if (!validSession(req)) { socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); return socket.destroy(); }
-  req.url = req.url.replace(/^\/desktop/, '') || '/';
-  proxy.ws(req, socket, head, error => { if (error) socket.destroy(); });
-});
-proxy.on('error', () => {});
-server.listen(PORT, '0.0.0.0', () => console.log(`Nebula listening on port ${PORT}. Keep this Codespaces port private.`));
+  if (!req.url?.startsWith('/desktop/')) {
+    socket.destroy();
+    return;
+  }
 
-// Start the local browser/desktop stack. These processes are private to the container.
-const starter = spawn('/usr/local/bin/start-nebula-browser', [], { stdio: 'ignore', detached: true });
-starter.unref();
+  req.url = req.url.replace(/^\/desktop/, '') || '/';
+
+  proxy.ws(req, socket, head, () => socket.destroy());
+});
+
+proxy.on('error', () => {});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Nebula listening on port ${PORT}.`);
+  console.log('Keep the forwarded Codespaces port private.');
+
+  const starter = spawn('/usr/local/bin/start-nebula-browser', [], {
+    stdio: 'ignore',
+    detached: true
+  });
+
+  starter.on('error', error => {
+    console.error('Could not start browser services:', error.message);
+  });
+
+  starter.unref();
+});
